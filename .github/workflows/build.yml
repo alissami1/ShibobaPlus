@@ -11,7 +11,8 @@ jobs:
       - name: Collect
         run: |
           mkdir out
-          cp .theos/obj/ShibobaPlus.dylib out/
+          find .theos -name 'ShibobaPlus.dylib' -print -exec cp {} out/ \;
+          ls -la out
       - uses: actions/upload-artifact@v4
         with:
           name: ShibobaPlus
