@@ -1,0 +1,8 @@
+Package: com.shiboba.plus
+Name: ShibobaPlus
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Shiboba Plus add-on for Beegram
+Maintainer: shiboba
+Author: shiboba
+Section: Tweaks
