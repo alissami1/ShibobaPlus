@@ -375,18 +375,32 @@ static void SBPaintKB(UIView *v, int depth) {
 %end
 
 %hook UITextField
-- (UIKeyboardAppearance)keyboardAppearance { return SBBool(@"oled_kb", NO) ? UIKeyboardAppearanceDark : %orig; }
+- (UIKeyboardAppearance)keyboardAppearance {
+    UIKeyboardAppearance o = %orig;
+    return SBBool(@"oled_kb", NO) ? UIKeyboardAppearanceDark : o;
+}
 %end
+
 %hook UITextView
-- (UIKeyboardAppearance)keyboardAppearance { return SBBool(@"oled_kb", NO) ? UIKeyboardAppearanceDark : %orig; }
+- (UIKeyboardAppearance)keyboardAppearance {
+    UIKeyboardAppearance o = %orig;
+    return SBBool(@"oled_kb", NO) ? UIKeyboardAppearanceDark : o;
+}
 %end
+
 %hook UISearchBar
-- (UIKeyboardAppearance)keyboardAppearance { return SBBool(@"oled_kb", NO) ? UIKeyboardAppearanceDark : %orig; }
+- (UIKeyboardAppearance)keyboardAppearance {
+    UIKeyboardAppearance o = %orig;
+    return SBBool(@"oled_kb", NO) ? UIKeyboardAppearanceDark : o;
+}
 %end
 
 @interface UIKBRenderConfig : NSObject @end
 %hook UIKBRenderConfig
-- (BOOL)lightKeyboard { return SBBool(@"oled_kb", NO) ? NO : %orig; }
+- (BOOL)lightKeyboard {
+    BOOL o = %orig;
+    return SBBool(@"oled_kb", NO) ? NO : o;
+}
 %end
 
 #pragma mark - 2) Presence screen (last active time)
