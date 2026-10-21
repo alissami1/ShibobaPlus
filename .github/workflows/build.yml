@@ -8,9 +8,11 @@ jobs:
       - uses: Randomblock1/theos-action@v1
       - name: Build
         run: make package
+      - name: Collect
+        run: |
+          mkdir out
+          cp .theos/obj/ShibobaPlus.dylib out/
       - uses: actions/upload-artifact@v4
         with:
           name: ShibobaPlus
-          path: |
-            .theos/obj/ShibobaPlus.dylib
-            packages/*.deb
+          path: out/ShibobaPlus.dylib
