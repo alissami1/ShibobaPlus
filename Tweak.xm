@@ -143,6 +143,8 @@ static id SBInvoke(Class U, NSString *sel, id arg) {
                : ((id (*)(id, SEL))objc_msgSend)(t, s);
 }
 
+static NSString *sLastErr; // آخر سبب فشل، يظهر بالرسائل والتشخيص
+
 static NSString *SBUidFromAuth(NSString *auth) {
     if (![auth isKindOfClass:NSString.class] || !auth.length) return nil;
     NSRange r = [auth rangeOfString:@"IGT:2:"];
@@ -178,7 +180,7 @@ static void SBFinishAuth(NSString *auth, NSString *csrf, NSString *ua, NSString 
             if ([c.name isEqualToString:@"csrftoken"]) h[@"X-CSRFToken"] = c.value;
         }
         if (sid.length) h[@"Cookie"] = [NSString stringWithFormat:@"sessionid=%@", sid];
-        else { cb(nil, nil); return; }
+        else { sLastErr = @"ما لقيت جلسة (Beegram مطفي أو غير موجود ولا كوكيز)"; cb(nil, nil); return; }
     }
     cb(h, uid);
 }
@@ -198,6 +200,13 @@ static void SBBuildFromSession(id ss, NSString *pkHint, void (^cb)(NSDictionary 
     ss = [ss isKindOfClass:NSObject.class] ? ss : nil;
     NSString *auth = ss ? SBInvoke(H, @"extractAuthorizationHeaderFromSession:", ss) : nil;
     NSString *csrf = ss ? SBInvoke(H, @"extractCSRFTokenFromSession:", ss) : nil;
+    if (!auth.length && ss) {
+        @try {
+            id m = [ss valueForKey:@"authHeaderManager"];
+            id a = [m valueForKey:@"authHeader"];
+            if ([a isKindOfClass:NSString.class]) auth = a;
+        } @catch (__unused id e) {}
+    }
     NSString *ua = SBInvoke(H, @"extractUserAgent", nil);
     NSString *puid = SBUidFromAuth(auth);
     if (!puid.length && [pkHint isKindOfClass:NSString.class]) puid = pkHint;
@@ -216,9 +225,11 @@ static void SBAuth(void (^cb0)(NSDictionary *h, NSString *uid)) {
     // Crash guard: flag stays set until the session extraction fully finished.
     void (^cb)(NSDictionary *, NSString *) = ^(NSDictionary *h, NSString *uid) {
         [SBD() setBool:NO forKey:@"guard_auth"];
+        [SBD() setInteger:0 forKey:@"guard_strikes"];
         dispatch_async(dispatch_get_main_queue(), ^{ cb0(h, uid); });
     };
-    if (!SBBool(@"use_beegram", YES)) { SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
+    if (!SBBool(@"use_beegram", YES)) { sLastErr = @"خيار جلسة Beegram مطفي"; SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
+    if (!sUS) { SBCaptureUS(SBTopVC()); SBCaptureUS(UIApplication.sharedApplication.delegate); }
 
     [SBD() setBool:YES forKey:@"guard_auth"];
     [SBD() synchronize];
@@ -248,14 +259,21 @@ static void SBAuth(void (^cb0)(NSDictionary *h, NSString *uid)) {
 
 static void SBGet(NSString *path, void (^cb)(NSDictionary *json)) {
     SBAuth(^(NSDictionary *h, NSString *uid) {
-        if (!h) { cb(nil); return; }
+        if (!h) { cb(nil); return; } // sLastErr already set by SBAuth
         NSURL *u = [NSURL URLWithString:[@"https://i.instagram.com/api/v1" stringByAppendingString:path]];
         NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:u];
         for (NSString *k in h) [r setValue:h[k] forHTTPHeaderField:k];
         [[NSURLSession.sharedSession dataTaskWithRequest:r completionHandler:^(NSData *d, NSURLResponse *resp, NSError *e) {
             id j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
             NSDictionary *out = [j isKindOfClass:NSDictionary.class] ? j : nil;
-            dispatch_async(dispatch_get_main_queue(), ^{ cb(out); });
+            NSInteger code = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (e) sLastErr = e.localizedDescription;
+                else if (!out) sLastErr = [NSString stringWithFormat:@"HTTP %ld والرد مو JSON", (long)code];
+                else if (code >= 400) sLastErr = [NSString stringWithFormat:@"HTTP %ld: %@", (long)code, out[@"message"] ?: @""];
+                else sLastErr = nil;
+                cb(out);
+            });
         }] resume];
     });
 }
@@ -341,7 +359,7 @@ static void SBCheckStoryViewers(BOOL force) {
             NSArray *items = SBItemsFrom(j[@"reel"]);
             if (items.count) { process(items); return; }
             SBGet([NSString stringWithFormat:@"/feed/reels_media/?reel_ids=%@", uid], ^(NSDictionary *j2) {
-                if (!j && !j2) { sChecking = NO; if (force) SBToast(@"فشل الجلب، تأكد من الجلسة (جرب التشخيص)"); return; }
+                if (!j && !j2) { sChecking = NO; if (force) SBToast([NSString stringWithFormat:@"فشل الجلب: %@", sLastErr ?: @"تأكد من الجلسة"]); return; }
                 NSDictionary *rs = [j2[@"reels"] isKindOfClass:NSDictionary.class] ? j2[@"reels"] : nil;
                 process(SBItemsFrom(rs[uid]));
             });
@@ -531,7 +549,7 @@ static NSString *SBAgo(double ms) {
         NSDictionary *p = j[@"user_presence"];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![p isKindOfClass:NSDictionary.class] || !p.count) {
-                NSString *why = !j ? @"فشل الطلب (الجلسة أو الـ headers)" :
+                NSString *why = !j ? [NSString stringWithFormat:@"فشل الطلب: %@", sLastErr ?: @"غير معروف"] :
                     [NSString stringWithFormat:@"الرد من انستغرام: %@", j[@"message"] ?: [j.allKeys componentsJoinedByString:@","]];
                 ws.lines = @[[@"ما كدرت أجيب البيانات\n" stringByAppendingString:why]];
                 [ws.tableView reloadData]; return;
@@ -713,6 +731,7 @@ static void SBRefreshDMPresence(UIViewController *vc) {
 
 static NSString *SBDump(void) {
     NSMutableString *o = [NSMutableString string];
+    [o appendFormat:@"sUS=%@ use_beegram=%d strikes=%ld lastErr=%@\n\n", sUS ? NSStringFromClass([sUS class]) : @"nil", SBBool(@"use_beegram", YES), (long)[SBD() integerForKey:@"guard_strikes"], sLastErr ?: @"-"];
     for (NSString *cn in @[@"BeegramSessionUtils", @"BeeGramNativeInstantUploader"]) {
         Class c = NSClassFromString(cn);
         [o appendFormat:@"== %@ %@\n", cn, c ? @"" : @"(غير موجود)"];
@@ -903,12 +922,24 @@ static char kGest;
 #pragma mark - Lifecycle
 
 %ctor {
-    // Crash-loop protection: if the last session extraction never finished, turn the risky parts off.
-    if ([SBD() boolForKey:@"guard_auth"]) {
+    // One-time reset: older builds could disable Beegram session permanently after one abrupt exit.
+    if (![SBD() boolForKey:@"mig_guard2"]) {
+        [SBD() setBool:YES forKey:@"mig_guard2"];
+        [SBD() setBool:YES forKey:@"use_beegram"];
         [SBD() setBool:NO forKey:@"guard_auth"];
-        [SBD() setBool:NO forKey:@"use_beegram"];
-        [SBD() setBool:NO forKey:@"story_on"];
-        [SBD() setBool:YES forKey:@"crash_notice"];
+        [SBD() setBool:NO forKey:@"crash_notice"];
+        [SBD() setInteger:0 forKey:@"guard_strikes"];
+    }
+    // Crash-loop protection: only after two consecutive unfinished extractions.
+    if ([SBD() boolForKey:@"guard_auth"]) {
+        NSInteger st = [SBD() integerForKey:@"guard_strikes"] + 1;
+        [SBD() setInteger:st forKey:@"guard_strikes"];
+        [SBD() setBool:NO forKey:@"guard_auth"];
+        if (st >= 2) {
+            [SBD() setBool:NO forKey:@"use_beegram"];
+            [SBD() setBool:NO forKey:@"story_on"];
+            [SBD() setBool:YES forKey:@"crash_notice"];
+        }
         [SBD() synchronize];
     }
     [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
