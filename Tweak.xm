@@ -153,7 +153,7 @@ static NSString *SBUidFromAuth(NSString *auth) {
     return [j isKindOfClass:NSDictionary.class] && j[@"ds_user_id"] ? [NSString stringWithFormat:@"%@", j[@"ds_user_id"]] : nil;
 }
 
-static void SBFinishAuth(NSString *auth, NSString *csrf, NSString *ua, NSString *uid,
+static void SBFinishAuth(NSString *auth, NSString *csrf, NSString *ua, NSString *uid, NSDictionary *extra,
                          void (^cb)(NSDictionary *, NSString *)) {
     if (![auth isKindOfClass:NSString.class]) auth = nil;
     if (![csrf isKindOfClass:NSString.class]) csrf = nil;
@@ -167,6 +167,7 @@ static void SBFinishAuth(NSString *auth, NSString *csrf, NSString *ua, NSString 
     if (csrf.length) h[@"X-CSRFToken"] = csrf;
     if (!uid.length) uid = SBUidFromAuth(auth);
     if (uid.length) h[@"IG-U-DS-USER-ID"] = uid;
+    if ([extra isKindOfClass:NSDictionary.class]) [h addEntriesFromDictionary:extra];
 
     if (!auth.length) { // cookie fallback
         NSString *sid = nil;
@@ -188,11 +189,11 @@ static void SBAuth(void (^cb0)(NSDictionary *h, NSString *uid)) {
         [SBD() setBool:NO forKey:@"guard_auth"];
         dispatch_async(dispatch_get_main_queue(), ^{ cb0(h, uid); });
     };
-    if (!SBBool(@"use_beegram", YES)) { SBFinishAuth(nil, nil, nil, nil, cb); return; }
+    if (!SBBool(@"use_beegram", YES)) { SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
     Class U = NSClassFromString(@"BeegramSessionUtils");
     SEL sSess = NSSelectorFromString(@"extractUserSessionWithCompletion:");
     id target = SBTargetFor(U, sSess);
-    if (!target || !SBSigOK(target, sSess, 1, NO)) { SBFinishAuth(nil, nil, nil, nil, cb); return; }
+    if (!target || !SBSigOK(target, sSess, 1, NO)) { SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
 
     [SBD() setBool:YES forKey:@"guard_auth"];
     [SBD() synchronize];
@@ -205,12 +206,21 @@ static void SBAuth(void (^cb0)(NSDictionary *h, NSString *uid)) {
             NSString *auth = ss ? SBInvoke(H, @"extractAuthorizationHeaderFromSession:", ss) : nil;
             NSString *csrf = ss ? SBInvoke(H, @"extractCSRFTokenFromSession:", ss) : nil;
             NSString *ua = SBInvoke(H, @"extractUserAgent", nil);
-            SBFinishAuth(auth, csrf, ua, nil, cb);
+            NSString *puid = SBUidFromAuth(auth);
+            NSDictionary *extra = nil;
+            SEL ap = NSSelectorFromString(@"applyInstagramAuthHeadersToRequest:session:userPk:");
+            id at = SBTargetFor(H, ap);
+            if (ss && puid.length && at && SBSigOK(at, ap, 3, NO)) {
+                NSMutableURLRequest *dummy = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://i.instagram.com/api/v1/"]];
+                ((void (*)(id, SEL, id, id, id))objc_msgSend)(at, ap, dummy, ss, puid);
+                extra = dummy.allHTTPHeaderFields;
+            }
+            SBFinishAuth(auth, csrf, ua, puid, extra, cb);
         });
     };
     ((void (*)(id, SEL, id))objc_msgSend)(target, sSess, got);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (!done) { done = YES; SBFinishAuth(nil, nil, nil, nil, cb); }
+        if (!done) { done = YES; SBFinishAuth(nil, nil, nil, nil, nil, cb); }
     });
 }
 
@@ -237,10 +247,15 @@ static void SBLog(NSString *type, NSString *user) {
     [SBD() setObject:a forKey:@"log"];
 }
 static void SBNotify(NSString *body) {
-    UNMutableNotificationContent *c = [UNMutableNotificationContent new];
-    c.title = @"شيبوبة بلس"; c.body = body; c.sound = UNNotificationSound.defaultSound;
-    [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:
-        [UNNotificationRequest requestWithIdentifier:NSUUID.UUID.UUIDString content:c trigger:nil] withCompletionHandler:nil];
+    @try {
+        UNMutableNotificationContent *c = [UNMutableNotificationContent new];
+        c.title = @"شيبوبة بلس"; c.body = body; c.sound = UNNotificationSound.defaultSound;
+        UNUserNotificationCenter *nc = UNUserNotificationCenter.currentNotificationCenter;
+        [nc requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+                          completionHandler:^(BOOL ok, NSError *e) {}];
+        [nc addNotificationRequest:[UNNotificationRequest requestWithIdentifier:NSUUID.UUID.UUIDString content:c trigger:nil]
+             withCompletionHandler:nil];
+    } @catch (__unused id e) {}
     SBToast(body);
 }
 
@@ -248,28 +263,30 @@ static void SBNotify(NSString *body) {
 
 static BOOL sChecking = NO;
 
+static NSArray *SBItemsFrom(NSDictionary *reel) {
+    return [reel isKindOfClass:NSDictionary.class] && [reel[@"items"] isKindOfClass:NSArray.class] ? reel[@"items"] : nil;
+}
+
 static void SBCheckStoryViewers(BOOL force) {
     if (!force && !SBBool(@"story_on", NO)) return;
     if (sChecking) return;
     sChecking = YES;
     SBAuth(^(NSDictionary *h, NSString *uid) {
         if (!uid.length) { sChecking = NO; if (force) SBToast(@"ما كدرت أجيب الجلسة"); return; }
-        SBGet([NSString stringWithFormat:@"/feed/reels_media/?reel_ids=%@", uid], ^(NSDictionary *j) {
-            if (!j) { sChecking = NO; if (force) SBToast(@"فشل الجلب، تأكد من الجلسة (جرب التشخيص)"); return; }
-            NSDictionary *rs = [j[@"reels"] isKindOfClass:NSDictionary.class] ? j[@"reels"] : nil;
-            NSDictionary *reel = [rs[uid] isKindOfClass:NSDictionary.class] ? rs[uid] : nil;
-            NSArray *items = [reel[@"items"] isKindOfClass:NSArray.class] ? reel[@"items"] : nil;
+
+        void (^process)(NSArray *) = ^(NSArray *items) {
             if (!items.count) { sChecking = NO; if (force) SBToast(@"ما عندك ستوري فعال"); return; }
             BOOL baseline = ![SBD() boolForKey:@"story_base"];
             NSMutableDictionary *seen = [([SBD() dictionaryForKey:@"story_seen"] ?: @{}) mutableCopy];
             dispatch_group_t g = dispatch_group_create();
-            __block NSInteger fresh = 0;
+            __block NSInteger fresh = 0, failed = 0;
             for (NSDictionary *it in items) {
                 if (![it isKindOfClass:NSDictionary.class]) continue;
                 NSString *pk = [NSString stringWithFormat:@"%@", it[@"pk"] ?: it[@"id"]];
                 if ([pk containsString:@"_"]) pk = [pk componentsSeparatedByString:@"_"].firstObject;
                 dispatch_group_enter(g);
                 SBGet([NSString stringWithFormat:@"/media/%@/list_reel_media_viewer/", pk], ^(NSDictionary *vj) {
+                    if (!vj) { failed++; dispatch_group_leave(g); return; }
                     NSArray *users = [vj[@"users"] isKindOfClass:NSArray.class] ? vj[@"users"] : ([vj[@"viewers"] isKindOfClass:NSArray.class] ? vj[@"viewers"] : @[]);
                     NSMutableArray *old = [([seen[pk] isKindOfClass:NSArray.class] ? seen[pk] : @[]) mutableCopy];
                     for (NSDictionary *e in users) {
@@ -282,9 +299,7 @@ static void SBCheckStoryViewers(BOOL force) {
                             fresh++;
                             NSString *name = u[@"username"] ?: vpk;
                             SBLog(@"story", name);
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                SBNotify([NSString stringWithFormat:@"@%@ شاف الستوري مالتك 👁", name]);
-                            });
+                            SBNotify([NSString stringWithFormat:@"@%@ شاف الستوري مالتك 👁", name]);
                         }
                     }
                     seen[pk] = old;
@@ -293,9 +308,20 @@ static void SBCheckStoryViewers(BOOL force) {
             }
             dispatch_group_notify(g, dispatch_get_main_queue(), ^{
                 [SBD() setObject:seen forKey:@"story_seen"];
-                [SBD() setBool:YES forKey:@"story_base"];
+                if (failed == 0) [SBD() setBool:YES forKey:@"story_base"];
                 sChecking = NO;
-                if (force && fresh == 0) SBToast(baseline ? @"تم حفظ المشاهدات الحالية، الجديد راح ينبلغ عنه" : @"ماكو مشاهدات جديدة");
+                if (force && failed) SBToast([NSString stringWithFormat:@"فشل جلب المشاهدات لـ %ld ستوري", (long)failed]);
+                else if (force && fresh == 0) SBToast(baseline ? @"تم حفظ المشاهدات الحالية، الجديد راح ينبلغ عنه" : @"ماكو مشاهدات جديدة");
+            });
+        };
+
+        SBGet([NSString stringWithFormat:@"/feed/user/%@/story/", uid], ^(NSDictionary *j) {
+            NSArray *items = SBItemsFrom(j[@"reel"]);
+            if (items.count) { process(items); return; }
+            SBGet([NSString stringWithFormat:@"/feed/reels_media/?reel_ids=%@", uid], ^(NSDictionary *j2) {
+                if (!j && !j2) { sChecking = NO; if (force) SBToast(@"فشل الجلب، تأكد من الجلسة (جرب التشخيص)"); return; }
+                NSDictionary *rs = [j2[@"reels"] isKindOfClass:NSDictionary.class] ? j2[@"reels"] : nil;
+                process(SBItemsFrom(rs[uid]));
             });
         });
     });
@@ -399,27 +425,6 @@ static void SBPaintKB(UIView *v, int depth) {
     for (UIView *s in v.subviews) SBPaintKB(s, depth + 1);
 }
 
-static UIWindow *sBlackWin;
-static void SBBlackout(BOOL show) {
-    if (show && !SBBool(@"kb_blackout", NO)) return;
-    if (show) {
-        UIWindowScene *sc = SBScene();
-        if (sBlackWin || !sc) return;
-        UIWindow *w = [[UIWindow alloc] initWithWindowScene:sc];
-        w.windowLevel = UIWindowLevelAlert + 500;
-        w.backgroundColor = SBColor(SBStr(@"kb_color", @"#000000"), UIColor.blackColor);
-        w.userInteractionEnabled = NO;
-        UIViewController *vc = [UIViewController new];
-        vc.view.backgroundColor = UIColor.clearColor;
-        w.rootViewController = vc;
-        w.alpha = 0; w.hidden = NO; sBlackWin = w;
-        [UIView animateWithDuration:.2 animations:^{ w.alpha = 1; }];
-    } else if (sBlackWin) {
-        UIWindow *w = sBlackWin; sBlackWin = nil;
-        [UIView animateWithDuration:.2 animations:^{ w.alpha = 0; } completion:^(BOOL f) { w.hidden = YES; }];
-    }
-}
-
 %hook UIInputSetHostView
 - (void)layoutSubviews {
     %orig;
@@ -497,7 +502,9 @@ static NSString *SBAgo(double ms) {
         NSDictionary *p = j[@"user_presence"];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![p isKindOfClass:NSDictionary.class] || !p.count) {
-                ws.lines = @[@"ما كدرت أجيب البيانات (تأكد من الجلسة أو من إعدادات حالة النشاط)"];
+                NSString *why = !j ? @"فشل الطلب (الجلسة أو الـ headers)" :
+                    [NSString stringWithFormat:@"الرد من انستغرام: %@", j[@"message"] ?: [j.allKeys componentsJoinedByString:@","]];
+                ws.lines = @[[@"ما كدرت أجيب البيانات\n" stringByAppendingString:why]];
                 [ws.tableView reloadData]; return;
             }
             NSArray *keys = [p keysSortedByValueUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
@@ -539,6 +546,138 @@ static NSString *SBAgo(double ms) {
     return c;
 }
 @end
+
+#pragma mark - 2b) Presence line inside a DM thread
+
+@interface IGDirectThreadViewController : UIViewController @end
+@interface IGActivityFeedViewController : UIViewController @end
+
+static char kPTimer;
+
+static NSString *SBExact(double ms) {
+    NSDateFormatter *f = [NSDateFormatter new]; f.dateFormat = @"HH:mm — yyyy/MM/dd";
+    return [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:ms / 1000.0]];
+}
+
+// cb(text) is called on the main thread.
+static void SBLoadThreadPresence(NSString *tid, void (^cb)(NSString *)) {
+    SBGet([NSString stringWithFormat:@"/direct_v2/threads/%@/", tid], ^(NSDictionary *j) {
+        NSDictionary *th = [j[@"thread"] isKindOfClass:NSDictionary.class] ? j[@"thread"] : nil;
+        NSArray *users = [th[@"users"] isKindOfClass:NSArray.class] ? th[@"users"] : nil;
+        if (!users.count) { cb(j ? @"ما كدرت أقرأ المحادثة" : @"فشل الجلب (الجلسة)"); return; }
+        SBGet(@"/direct_v2/get_presence/", ^(NSDictionary *pj) {
+            NSDictionary *p = [pj[@"user_presence"] isKindOfClass:NSDictionary.class] ? pj[@"user_presence"] : nil;
+            if (!p) { cb(pj ? @"النشاط غير متاح" : @"فشل الجلب (الجلسة)"); return; }
+            double bestMs = 0; BOOL active = NO; NSString *bestName = nil; NSInteger known = 0;
+            for (NSDictionary *u in users) {
+                if (![u isKindOfClass:NSDictionary.class]) continue;
+                NSDictionary *e = p[[NSString stringWithFormat:@"%@", u[@"pk"] ?: u[@"id"]]];
+                if (![e isKindOfClass:NSDictionary.class]) continue;
+                known++;
+                double ms = [e[@"last_activity_at_ms"] doubleValue];
+                BOOL a = [e[@"is_active"] boolValue];
+                if ((a && !active) || (a == active && ms > bestMs)) { bestMs = ms; active = a; bestName = u[@"username"]; }
+            }
+            if (!known) { cb(@"نشاطه مخفي"); return; }
+            NSString *who = users.count > 1 && bestName ? [NSString stringWithFormat:@"@%@ ", bestName] : @"";
+            if (active || SBAgo(bestMs).length == 0) { cb([who stringByAppendingString:@"🟢 نشط الآن"]); return; }
+            if ([SBAgo(bestMs) isEqualToString:@"نشط الآن"]) { cb([who stringByAppendingString:@"🟢 نشط الآن"]); return; }
+            cb([NSString stringWithFormat:@"%@⚪ نشط %@ · %@", who, SBAgo(bestMs), SBExact(bestMs)]);
+        });
+    });
+}
+
+static void SBRefreshDMPresence(UIViewController *vc) {
+    if (!vc.viewIfLoaded.window) return;
+    UIView *old = [vc.view viewWithTag:0x5B1B];
+    if (!SBBool(@"dm_presence", YES)) { [old removeFromSuperview]; return; }
+    SEL s = NSSelectorFromString(@"threadId");
+    id tid = SBSigOK(vc, s, 0, YES) ? ((id (*)(id, SEL))objc_msgSend)(vc, s) : nil;
+    if (![tid isKindOfClass:NSString.class] || ![tid length]) return;
+    __weak UIViewController *wvc = vc;
+    SBLoadThreadPresence(tid, ^(NSString *text) {
+        UIViewController *v = wvc; if (!v || !v.viewIfLoaded.window) return;
+        UILabel *l = (UILabel *)[v.view viewWithTag:0x5B1B];
+        if (!l) {
+            l = [UILabel new]; l.tag = 0x5B1B;
+            l.font = [UIFont boldSystemFontOfSize:12]; l.textColor = UIColor.whiteColor;
+            l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+            l.layer.cornerRadius = 13; l.clipsToBounds = YES; l.textAlignment = NSTextAlignmentCenter;
+            l.userInteractionEnabled = NO;
+            [v.view addSubview:l];
+        }
+        l.text = text;
+        CGFloat safeTop = v.view.safeAreaInsets.top, hh = 0;
+        SEL hs = NSSelectorFromString(@"headerHeight");
+        NSMethodSignature *ms = [v methodSignatureForSelector:hs];
+        if (ms && ms.methodReturnType[0] == 'd') hh = ((double (*)(id, SEL))objc_msgSend)(v, hs);
+        CGFloat y = hh >= safeTop + 30 ? hh : safeTop + MAX(hh, 44);
+        CGFloat w = MIN([l sizeThatFits:CGSizeMake(1000, 26)].width + 24, v.view.bounds.size.width - 24);
+        l.frame = CGRectMake((v.view.bounds.size.width - w) / 2, y + 4, w, 26);
+        [v.view bringSubviewToFront:l];
+    });
+}
+
+%hook IGDirectThreadViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    SBRefreshDMPresence(self);
+    NSTimer *old = objc_getAssociatedObject(self, &kPTimer); [old invalidate];
+    __weak UIViewController *wself = self;
+    NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:45 repeats:YES block:^(NSTimer *tm) {
+        UIViewController *v = wself;
+        if (!v.viewIfLoaded.window) { [tm invalidate]; return; }
+        SBRefreshDMPresence(v);
+    }];
+    objc_setAssociatedObject(self, &kPTimer, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    NSTimer *old = objc_getAssociatedObject(self, &kPTimer); [old invalidate];
+    objc_setAssociatedObject(self, &kPTimer, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+%end
+
+#pragma mark - 6b) Story viewers shortcut inside Instagram's Activity page
+
+@interface SBPHelper2 : NSObject
++ (void)openStoryLog:(UIButton *)b;
++ (void)closeLog;
+@end
+@implementation SBPHelper2
++ (void)openStoryLog:(UIButton *)b {
+    UIViewController *top = SBTopVC(); if (!top) return;
+    SBPListVC *v = [SBPListVC new];
+    UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:v];
+    n.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    v.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:SBPHelper2.class action:@selector(closeLog)];
+    [top presentViewController:n animated:YES completion:nil];
+}
++ (void)closeLog { [SBTopVC() dismissViewControllerAnimated:YES completion:nil]; }
+@end
+
+%hook IGActivityFeedViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    UIButton *b = (UIButton *)[self.view viewWithTag:0x5B2B];
+    if (!SBBool(@"story_on", NO)) { [b removeFromSuperview]; return; }
+    NSInteger n = 0;
+    for (NSDictionary *e in [SBD() arrayForKey:@"log"] ?: @[]) if ([e[@"t"] isEqualToString:@"story"]) n++;
+    if (!b) {
+        b = [UIButton buttonWithType:UIButtonTypeCustom]; b.tag = 0x5B2B;
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+        b.backgroundColor = [UIColor colorWithRed:.13 green:.55 blue:1 alpha:1];
+        b.layer.cornerRadius = 17; b.contentEdgeInsets = UIEdgeInsetsMake(0, 16, 0, 16);
+        [b addTarget:SBPHelper2.class action:@selector(openStoryLog:) forControlEvents:UIControlEventTouchUpInside];
+        [self.view addSubview:b];
+    }
+    [b setTitle:[NSString stringWithFormat:@"👁 مشاهدات الستوري (%ld)", (long)n] forState:UIControlStateNormal];
+    [b sizeToFit];
+    CGFloat w = b.bounds.size.width + 8;
+    b.frame = CGRectMake((self.view.bounds.size.width - w) / 2, self.view.bounds.size.height - self.view.safeAreaInsets.bottom - 70, w, 34);
+    [self.view bringSubviewToFront:b];
+}
+%end
 
 #pragma mark - Diagnostics (dump Beegram method signatures)
 
@@ -609,14 +748,14 @@ static NSString *SBDump(void) {
           @{@"t": @"مدة الظهور (ثواني)", @"k": @"welcome_dur", @"y": @"tx", @"d": @"2.5"},
           @{@"t": @"معاينة", @"y": @"go", @"a": @"preview"}]},
       @{@"h": @"النشاط", @"f": @"آخر ظهور بالساعة والدقيقة لجهات المراسلة.", @"i": @[
+          @{@"t": @"سطر النشاط داخل المحادثة", @"k": @"dm_presence", @"y": @"sw", @"dv": @YES},
           @{@"t": @"عرض آخر نشاط", @"y": @"go", @"a": @"presence"}]},
       @{@"h": @"الريلز", @"f": @"يطلع زر دائري بالريلز: يخفي اللايك والتعليقات والمشاركة والوصف، وترجعهم بنفس الزر.", @"i": @[
           @{@"t": @"زر التصفح النظيف", @"k": @"reels_btn", @"y": @"sw"}]},
-      @{@"h": @"الكيبورد", @"f": @"الكيبورد غامق والحروف بيضاء. \"شاشة سوداء\" تغطي كل الشاشة بلون الخلفية وما يبين غير الكيبورد.", @"i": @[
+      @{@"h": @"الكيبورد", @"f": @"الكيبورد غامق والحروف بيضاء بلون الخلفية اللي تختاره، وباقي الشاشة ما يتغير.", @"i": @[
           @{@"t": @"OLED كيبورد", @"k": @"oled_kb", @"y": @"sw"},
-          @{@"t": @"لون الخلفية", @"k": @"kb_color", @"y": @"cl", @"d": @"#000000"},
-          @{@"t": @"شاشة سوداء أثناء الكتابة", @"k": @"kb_blackout", @"y": @"sw"}]},
-      @{@"h": @"الإشعارات", @"f": @"زيارات البروفايل: انستغرام ما يعطي هذي المعلومة لأي تطبيق، لذلك ما موجودة.", @"i": @[
+          @{@"t": @"لون الخلفية", @"k": @"kb_color", @"y": @"cl", @"d": @"#000000"}]},
+      @{@"h": @"الإشعارات", @"f": @"زيارات البروفايل: انستغرام ما يعطي هذي المعلومة لأي تطبيق، لذلك ما موجودة. صفحة الإشعارات الأصلية يرسمها السيرفر، فمشاهدات الستوري تطلع بزر أزرق بأسفلها.", @"i": @[
           @{@"t": @"إشعار عند مشاهدة الستوري", @"k": @"story_on", @"y": @"sw"},
           @{@"t": @"استخدام جلسة Beegram", @"k": @"use_beegram", @"y": @"sw", @"dv": @YES},
           @{@"t": @"تشخيص (نسخ معلومات الدوال)", @"y": @"go", @"a": @"diag"},
@@ -733,10 +872,6 @@ static char kGest;
         [SBD() setBool:YES forKey:@"crash_notice"];
         [SBD() synchronize];
     }
-    [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardWillShowNotification object:nil
-                                                     queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { SBBlackout(YES); }];
-    [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardWillHideNotification object:nil
-                                                     queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { SBBlackout(NO); }];
     [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
                                                      queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         static BOOL first = YES;
@@ -752,7 +887,7 @@ static char kGest;
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ SBCheckStoryViewers(NO); });
     }];
-    [NSTimer scheduledTimerWithTimeInterval:300 repeats:YES block:^(NSTimer *t) {
+    [NSTimer scheduledTimerWithTimeInterval:90 repeats:YES block:^(NSTimer *t) {
         if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) SBCheckStoryViewers(NO);
     }];
 }
