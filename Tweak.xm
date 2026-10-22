@@ -74,7 +74,7 @@ static UIWindow *sWelcomeWin;
 static void SBShowWelcome(BOOL force) {
     if (!force && !SBBool(@"welcome_on", NO)) return;
     UIWindowScene *sc = SBScene(); if (!sc) return;
-    NSString *text = SBStr(@"welcome_text", @"أهلاً بك في شيبوبة بلس");
+    NSString *text = SBStr(@"welcome_text", @"أهلاً بك في شيبوبه بلس");
     UIColor *c = SBColor(SBStr(@"welcome_color", @"#00F6FF"), [UIColor cyanColor]);
     CGFloat size = SBNum(@"welcome_size", 28);
     double dur = SBNum(@"welcome_dur", 2.5);
@@ -289,7 +289,7 @@ static void SBLog(NSString *type, NSString *user) {
 static void SBNotify(NSString *body) {
     @try {
         UNMutableNotificationContent *c = [UNMutableNotificationContent new];
-        c.title = @"شيبوبة بلس"; c.body = body; c.sound = UNNotificationSound.defaultSound;
+        c.title = @"شيبوبه بلس"; c.body = body; c.sound = UNNotificationSound.defaultSound;
         UNUserNotificationCenter *nc = UNUserNotificationCenter.currentNotificationCenter;
         [nc requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
                           completionHandler:^(BOOL ok, NSError *e) {}];
@@ -774,7 +774,27 @@ static NSString *SBDump(void) {
 - (void)copyAll { UIPasteboard.generalPasteboard.string = self.tv.text; SBToast(@"اننسخ، الصقه وابعثه لي"); }
 @end
 
-#pragma mark - Settings screen "شيبوبة بلس"
+#pragma mark - Developer credit (name / photo / Instagram link)
+
+#define SBP_DEV_NAME @"علي لطيف"
+#define SBP_DEV_URL  @"https://www.instagram.com/23aj/"
+
+static UIImage *SBDevAvatar(void) {
+    static UIImage *img; static dispatch_once_t t;
+    dispatch_once(&t, ^{
+        NSData *d = [[NSData alloc] initWithBase64EncodedString:@"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" options:0];
+        if (d) img = [UIImage imageWithData:d scale:UIScreen.mainScreen.scale];
+    });
+    return img;
+}
+static void SBOpenDevProfile(void) {
+    NSURL *app = [NSURL URLWithString:@"instagram://user?username=23aj"];
+    NSURL *web = [NSURL URLWithString:SBP_DEV_URL];
+    UIApplication *a = UIApplication.sharedApplication;
+    [a openURL:([a canOpenURL:app] ? app : web) options:@{} completionHandler:nil];
+}
+
+#pragma mark - Settings screen "شيبوبه بلس"
 
 @interface SBPSettingsVC : UITableViewController <UIColorPickerViewControllerDelegate>
 @property (nonatomic, strong) NSArray<NSDictionary *> *secs;
@@ -785,13 +805,13 @@ static NSString *SBDump(void) {
 - (instancetype)init { return [super initWithStyle:UITableViewStyleInsetGrouped]; }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"شيبوبة بلس";
+    self.title = @"شيبوبه بلس";
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(close)];
     // y: sw = switch, tx = text prompt, go = action
     self.secs = @[
       @{@"h": @"الرسالة الترحيبية", @"f": @"تطلع شفافة بتوهج نيون أول ما ينفتح البرنامج.", @"i": @[
           @{@"t": @"تفعيل", @"k": @"welcome_on", @"y": @"sw"},
-          @{@"t": @"النص", @"k": @"welcome_text", @"y": @"tx", @"d": @"أهلاً بك في شيبوبة بلس"},
+          @{@"t": @"النص", @"k": @"welcome_text", @"y": @"tx", @"d": @"أهلاً بك في شيبوبه بلس"},
           @{@"t": @"اللون", @"k": @"welcome_color", @"y": @"cl", @"d": @"#00F6FF"},
           @{@"t": @"حجم الخط", @"k": @"welcome_size", @"y": @"tx", @"d": @"28"},
           @{@"t": @"مدة الظهور (ثواني)", @"k": @"welcome_dur", @"y": @"tx", @"d": @"2.5"},
@@ -809,7 +829,9 @@ static NSString *SBDump(void) {
           @{@"t": @"استخدام جلسة Beegram", @"k": @"use_beegram", @"y": @"sw", @"dv": @YES},
           @{@"t": @"تشخيص (نسخ معلومات الدوال)", @"y": @"go", @"a": @"diag"},
           @{@"t": @"فحص الآن", @"y": @"go", @"a": @"checknow"},
-          @{@"t": @"سجل الإشعارات", @"y": @"go", @"a": @"logs"}]}
+          @{@"t": @"سجل الإشعارات", @"y": @"go", @"a": @"logs"}]},
+      @{@"h": @"حول", @"f": @"شيبوبه بلس — تعديل: علي لطيف. مبني فوق Beegram مع الاحتفاظ بكريدت المطوّر الأصلي.", @"i": @[
+          @{@"t": SBP_DEV_NAME, @"s": @"المطوّر · شيبوبه", @"y": @"dev"}]}
     ];
 }
 - (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
@@ -839,6 +861,18 @@ static NSString *SBDump(void) {
     UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     c.textLabel.text = it[@"t"];
     NSString *y = it[@"y"];
+    if ([y isEqualToString:@"dev"]) {
+        UITableViewCell *dc = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        dc.textLabel.text = it[@"t"];
+        dc.textLabel.font = [UIFont boldSystemFontOfSize:17];
+        dc.detailTextLabel.text = it[@"s"];
+        dc.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+        dc.imageView.image = SBDevAvatar();
+        dc.imageView.layer.cornerRadius = 22; dc.imageView.clipsToBounds = YES;
+        dc.imageView.contentMode = UIViewContentModeScaleAspectFill;
+        dc.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return dc;
+    }
     if ([y isEqualToString:@"sw"]) {
         UISwitch *sw = [UISwitch new];
         sw.on = SBBool(it[@"k"], [it[@"dv"] boolValue]);
@@ -862,6 +896,7 @@ static NSString *SBDump(void) {
     [t deselectRowAtIndexPath:ip animated:YES];
     NSDictionary *it = self.secs[ip.section][@"i"][ip.row];
     NSString *y = it[@"y"];
+    if ([y isEqualToString:@"dev"]) { SBOpenDevProfile(); return; }
     if ([y isEqualToString:@"go"]) {
         SEL s = NSSelectorFromString(it[@"a"]);
         if ([self respondsToSelector:s]) ((void (*)(id, SEL))objc_msgSend)(self, s);
