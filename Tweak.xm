@@ -183,6 +183,35 @@ static void SBFinishAuth(NSString *auth, NSString *csrf, NSString *ua, NSString 
     cb(h, uid);
 }
 
+// Instagram's own IGUserSession, captured from any Instagram view controller that exposes -userSession.
+static id sUS;
+static void SBCaptureUS(id obj) {
+    if (!obj) return;
+    SEL s = NSSelectorFromString(@"userSession");
+    if (!SBSigOK(obj, s, 0, YES)) return;
+    id u = ((id (*)(id, SEL))objc_msgSend)(obj, s);
+    if (u && [NSStringFromClass([u class]) rangeOfString:@"UserSession"].location != NSNotFound) sUS = u;
+}
+
+static void SBBuildFromSession(id ss, NSString *pkHint, void (^cb)(NSDictionary *, NSString *)) {
+    Class H = NSClassFromString(@"BeeGramNativeInstantUploader");
+    ss = [ss isKindOfClass:NSObject.class] ? ss : nil;
+    NSString *auth = ss ? SBInvoke(H, @"extractAuthorizationHeaderFromSession:", ss) : nil;
+    NSString *csrf = ss ? SBInvoke(H, @"extractCSRFTokenFromSession:", ss) : nil;
+    NSString *ua = SBInvoke(H, @"extractUserAgent", nil);
+    NSString *puid = SBUidFromAuth(auth);
+    if (!puid.length && [pkHint isKindOfClass:NSString.class]) puid = pkHint;
+    NSDictionary *extra = nil;
+    SEL ap = NSSelectorFromString(@"applyInstagramAuthHeadersToRequest:session:userPk:");
+    id at = SBTargetFor(H, ap);
+    if (ss && puid.length && at && SBSigOK(at, ap, 3, NO)) {
+        NSMutableURLRequest *dummy = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://i.instagram.com/api/v1/"]];
+        ((void (*)(id, SEL, id, id, id))objc_msgSend)(at, ap, dummy, ss, puid);
+        extra = dummy.allHTTPHeaderFields;
+    }
+    SBFinishAuth(auth, csrf, ua, puid, extra, cb);
+}
+
 static void SBAuth(void (^cb0)(NSDictionary *h, NSString *uid)) {
     // Crash guard: flag stays set until the session extraction fully finished.
     void (^cb)(NSDictionary *, NSString *) = ^(NSDictionary *h, NSString *uid) {
@@ -190,32 +219,25 @@ static void SBAuth(void (^cb0)(NSDictionary *h, NSString *uid)) {
         dispatch_async(dispatch_get_main_queue(), ^{ cb0(h, uid); });
     };
     if (!SBBool(@"use_beegram", YES)) { SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
+
+    [SBD() setBool:YES forKey:@"guard_auth"];
+    [SBD() synchronize];
+
+    // 1) Session we captured ourselves from Instagram's view controllers.
+    if (sUS) { SBBuildFromSession(sUS, nil, cb); return; }
+
+    // 2) Beegram's own extraction: completion is called as (session, userPk, username).
     Class U = NSClassFromString(@"BeegramSessionUtils");
     SEL sSess = NSSelectorFromString(@"extractUserSessionWithCompletion:");
     id target = SBTargetFor(U, sSess);
     if (!target || !SBSigOK(target, sSess, 1, NO)) { SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
-
-    [SBD() setBool:YES forKey:@"guard_auth"];
-    [SBD() synchronize];
     __block BOOL done = NO;
-    void (^got)(id) = ^(id session) {
+    void (^got)(id, id, id) = ^(id session, id userPk, id username) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (done) return; done = YES;
-            Class H = NSClassFromString(@"BeeGramNativeInstantUploader");
-            id ss = [session isKindOfClass:NSObject.class] ? session : nil;
-            NSString *auth = ss ? SBInvoke(H, @"extractAuthorizationHeaderFromSession:", ss) : nil;
-            NSString *csrf = ss ? SBInvoke(H, @"extractCSRFTokenFromSession:", ss) : nil;
-            NSString *ua = SBInvoke(H, @"extractUserAgent", nil);
-            NSString *puid = SBUidFromAuth(auth);
-            NSDictionary *extra = nil;
-            SEL ap = NSSelectorFromString(@"applyInstagramAuthHeadersToRequest:session:userPk:");
-            id at = SBTargetFor(H, ap);
-            if (ss && puid.length && at && SBSigOK(at, ap, 3, NO)) {
-                NSMutableURLRequest *dummy = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://i.instagram.com/api/v1/"]];
-                ((void (*)(id, SEL, id, id, id))objc_msgSend)(at, ap, dummy, ss, puid);
-                extra = dummy.allHTTPHeaderFields;
-            }
-            SBFinishAuth(auth, csrf, ua, puid, extra, cb);
+            id ss = session ?: sUS;
+            if (!ss) { SBFinishAuth(nil, nil, nil, nil, nil, cb); return; }
+            SBBuildFromSession(ss, [userPk isKindOfClass:NSString.class] ? userPk : nil, cb);
         });
     };
     ((void (*)(id, SEL, id))objc_msgSend)(target, sSess, got);
@@ -272,7 +294,7 @@ static void SBCheckStoryViewers(BOOL force) {
     if (sChecking) return;
     sChecking = YES;
     SBAuth(^(NSDictionary *h, NSString *uid) {
-        if (!uid.length) { sChecking = NO; if (force) SBToast(@"ما كدرت أجيب الجلسة"); return; }
+        if (!uid.length) { sChecking = NO; if (force) SBToast(@"ما كدرت أجيب الجلسة، افتح الرئيسية أو شات وعيد المحاولة"); return; }
 
         void (^process)(NSArray *) = ^(NSArray *items) {
             if (!items.count) { sChecking = NO; if (force) SBToast(@"ما عندك ستوري فعال"); return; }
@@ -417,10 +439,16 @@ static void SBOpenSettings(void);
 @interface UIInputSetHostView : UIView @end
 
 static void SBPaintKB(UIView *v, int depth) {
+    CGFloat h = v.bounds.size.height, H = UIScreen.mainScreen.bounds.size.height;
+    BOOL big = h > H * 0.5;               // never touch anything that could cover the app
     NSString *n = NSStringFromClass(v.class);
-    if ([n isEqualToString:@"UIKBInputBackdropView"] || [n isEqualToString:@"_UIBackdropView"] ||
-        [v isKindOfClass:UIVisualEffectView.class]) { v.hidden = YES; return; }
-    if ([n isEqualToString:@"UIKBBackgroundView"]) v.backgroundColor = SBColor(SBStr(@"kb_color", @"#000000"), UIColor.blackColor);
+    if (!big) {
+        if ([n isEqualToString:@"UIKBInputBackdropView"] ||
+            (([n isEqualToString:@"_UIBackdropView"] || [v isKindOfClass:UIVisualEffectView.class]) && h >= 150)) {
+            v.hidden = YES; return;
+        }
+        if ([n isEqualToString:@"UIKBBackgroundView"]) v.backgroundColor = SBColor(SBStr(@"kb_color", @"#000000"), UIColor.blackColor);
+    }
     if (depth > 4) return;
     for (UIView *s in v.subviews) SBPaintKB(s, depth + 1);
 }
@@ -429,7 +457,8 @@ static void SBPaintKB(UIView *v, int depth) {
 - (void)layoutSubviews {
     %orig;
     if (!SBBool(@"oled_kb", NO)) return;
-    self.backgroundColor = SBColor(SBStr(@"kb_color", @"#000000"), UIColor.blackColor);
+    if (self.bounds.size.height <= UIScreen.mainScreen.bounds.size.height * 0.5)
+        self.backgroundColor = SBColor(SBStr(@"kb_color", @"#000000"), UIColor.blackColor);
     SBPaintKB(self, 0);
 }
 %end
@@ -621,6 +650,7 @@ static void SBRefreshDMPresence(UIViewController *vc) {
 %hook IGDirectThreadViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    SBCaptureUS(self);
     SBRefreshDMPresence(self);
     NSTimer *old = objc_getAssociatedObject(self, &kPTimer); [old invalidate];
     __weak UIViewController *wself = self;
@@ -858,6 +888,15 @@ static char kGest;
         [self addGestureRecognizer:g];
         objc_setAssociatedObject(self, &kGest, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+}
+%end
+
+#pragma mark - Session capture
+
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if ([NSStringFromClass(self.class) hasPrefix:@"IG"]) SBCaptureUS(self);
 }
 %end
 
